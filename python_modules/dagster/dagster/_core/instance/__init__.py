@@ -16,6 +16,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Final,
     Generic,
     Iterable,
     List,
@@ -103,6 +104,11 @@ IS_AIRFLOW_INGEST_PIPELINE_STR = "is_airflow_ingest_pipeline"
 RUNLESS_RUN_ID = ""
 RUNLESS_JOB_NAME = ""
 
+# Sets the number of events that will be buffered before being written to the event log. Only
+# applies to explicitly batched events.
+EVENT_BATCH_SIZE: Final = int(os.getenv("DAGSTER_EVENT_BATCH_SIZE", "100"))
+
+
 if TYPE_CHECKING:
     from dagster._core.debug import DebugRunPayload
     from dagster._core.definitions.asset_check_spec import AssetCheckKey
@@ -122,6 +128,7 @@ if TYPE_CHECKING:
     from dagster._core.events import (
         AssetMaterialization,
         DagsterEvent,
+        DagsterEventBatchMetadata,
         DagsterEventType,
         EngineEventData,
     )
@@ -224,18 +231,21 @@ class _EventListenerLogHandler(logging.Handler):
         from dagster._core.events import EngineEventData
         from dagster._core.events.log import StructuredLoggerMessage, construct_event_record
 
+        record_metadata = get_log_record_metadata(record)
         event = construct_event_record(
             StructuredLoggerMessage(
                 name=record.name,
                 message=record.msg,
                 level=record.levelno,
-                meta=get_log_record_metadata(record),
+                meta=record_metadata,
                 record=record,
             )
         )
 
         try:
-            self._instance.handle_new_event(event)
+            self._instance.handle_new_event(
+                event, batch_metadata=record_metadata["dagster_event_batch_metadata"]
+            )
         except Exception as e:
             sys.stderr.write(f"Exception while writing logger call to event log: {e}\n")
             if event.dagster_event:
@@ -480,6 +490,9 @@ class DagsterInstance(DynamicPartitionsStore):
                 "Run retries are enabled, but the configured event log storage does not support"
                 " them. Consider switching to Postgres or Mysql.",
             )
+
+        # Used for batched event handling
+        self._event_buffer: Dict[str, List[EventLogEntry]] = defaultdict(list)
 
     # ctors
 
@@ -2361,16 +2374,35 @@ class DagsterInstance(DynamicPartitionsStore):
     def store_event(self, event: "EventLogEntry") -> None:
         self._event_storage.store_event(event)
 
-    def handle_new_event(self, event: "EventLogEntry") -> None:
-        run_id = event.run_id
+    def handle_new_event(
+        self,
+        event: "EventLogEntry",
+        *,
+        batch_metadata: Optional["DagsterEventBatchMetadata"] = None,
+    ) -> None:
+        if batch_metadata is None:
+            events = [event]
+        else:
+            batch_id, is_batch_end = batch_metadata.id, batch_metadata.is_end
+            self._event_buffer[batch_id].append(event)
+            if is_batch_end or len(self._event_buffer[batch_id]) == EVENT_BATCH_SIZE:
+                events = self._event_buffer[batch_id]
+                del self._event_buffer[batch_id]
+            else:
+                return
 
-        self._event_storage.store_event(event)
+        if len(events) == 1:
+            self._event_storage.store_event(events[0])
+        else:
+            self._event_storage.store_event_batch(events)
 
-        if event.is_dagster_event and event.get_dagster_event().is_job_event:
-            self._run_storage.handle_run_event(run_id, event.get_dagster_event())
+        for event in events:
+            run_id = event.run_id
+            if event.is_dagster_event and event.get_dagster_event().is_job_event:
+                self._run_storage.handle_run_event(run_id, event.get_dagster_event())
 
-        for sub in self._subscribers[run_id]:
-            sub(event)
+            for sub in self._subscribers[run_id]:
+                sub(event)
 
     def add_event_listener(self, run_id: str, cb) -> None:
         self._subscribers[run_id].append(cb)
