@@ -327,9 +327,9 @@ def test_get_implicit_job_name_for_assets(instance):
 def test_auto_materialize_policy(instance):
     asset_graph = ExternalAssetGraph.from_workspace(_make_context(instance, ["partitioned_defs"]))
 
-    assert asset_graph.get_auto_materialize_policy(
+    assert asset_graph.get_asset(
         AssetKey("downstream_of_partitioned_source")
-    ) == AutoMaterializePolicy.eager(
+    ).auto_materialize_policy == AutoMaterializePolicy.eager(
         max_materializations_per_minute=75,
     )
 
@@ -405,16 +405,18 @@ def test_assets_with_backfill_policies(instance):
         _make_context(instance, ["backfill_assets_defs"])
     )
     assert (
-        asset_graph.get_backfill_policy(AssetKey("static_partitioned_single_run_backfill_asset"))
+        asset_graph.get_asset(
+            AssetKey("static_partitioned_single_run_backfill_asset")
+        ).backfill_policy
         == BackfillPolicy.single_run()
     )
     assert (
-        asset_graph.get_backfill_policy(AssetKey("non_partitioned_single_run_backfill_asset"))
+        asset_graph.get_asset(AssetKey("non_partitioned_single_run_backfill_asset")).backfill_policy
         == BackfillPolicy.single_run()
     )
-    assert asset_graph.get_backfill_policy(
+    assert asset_graph.get_asset(
         AssetKey("static_partitioned_multi_run_backfill_asset")
-    ) == BackfillPolicy.multi_run(5)
+    ).backfill_policy == BackfillPolicy.multi_run(5)
 
 
 @asset(deps=[SourceAsset("b")])

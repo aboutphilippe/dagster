@@ -8,6 +8,7 @@ from typing import (
     AbstractSet,
     Callable,
     Dict,
+    Generic,
     Iterable,
     Iterator,
     Mapping,
@@ -15,11 +16,13 @@ from typing import (
     Optional,
     Sequence,
     Set,
+    TypeVar,
     Union,
     cast,
 )
 
 import toposort
+from typing_extensions import Self
 
 import dagster._check as check
 from dagster._core.definitions.asset_subset import ValidAssetSubset
@@ -67,60 +70,135 @@ class ParentsPartitionsResult(NamedTuple):
     required_but_nonexistent_parents_partitions: AbstractSet[AssetKeyPartitionKey]
 
 
-class AssetGraph(ABC):
+class AssetNode(ABC):
+    key: AssetKey
+
+    @property
+    @abstractmethod
+    def group_name(self) -> Optional[str]:
+        ...
+
+    @property
+    @abstractmethod
+    def is_materializable(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def is_observable(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def is_external(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def is_executable(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def is_partitioned(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def partitions_def(self) -> Optional[PartitionsDefinition]:
+        ...
+
+    @property
+    @abstractmethod
+    def partition_mappings(self) -> Mapping[AssetKey, PartitionMapping]:
+        ...
+
+    def get_partition_mapping(self, parent_asset: Self) -> PartitionMapping:
+        return infer_partition_mapping(
+            self.partition_mappings.get(parent_asset.key),
+            self.partitions_def,
+            parent_asset.partitions_def,
+        )
+
+    @property
+    @abstractmethod
+    def freshness_policy(self) -> Optional[FreshnessPolicy]:
+        ...
+
+    @property
+    @abstractmethod
+    def auto_materialize_policy(self) -> Optional[AutoMaterializePolicy]:
+        ...
+
+    @property
+    @abstractmethod
+    def auto_observe_interval_minutes(self) -> Optional[float]:
+        ...
+
+    @property
+    @abstractmethod
+    def backfill_policy(self) -> Optional[BackfillPolicy]:
+        ...
+
+    @property
+    @abstractmethod
+    def code_version(self) -> Optional[str]:
+        ...
+
+
+T_AssetNode = TypeVar("T_AssetNode", bound=AssetNode)
+
+
+class AssetGraph(ABC, Generic[T_AssetNode]):
+    _asset_nodes: Sequence[T_AssetNode]
+
+    @property
+    def asset_nodes(self) -> Iterable[T_AssetNode]:
+        return self._asset_nodes
+
+    @property
+    @cached_method
+    def asset_nodes_by_key(self) -> Mapping[AssetKey, T_AssetNode]:
+        return {node.key: node for node in self.asset_nodes}
+
+    def has_asset(self, asset_key: AssetKey) -> bool:
+        return asset_key in self.all_asset_keys
+
+    def get_asset(self, asset_key: AssetKey) -> T_AssetNode:
+        return self.asset_nodes_by_key[asset_key]
+
     @property
     @abstractmethod
     def asset_dep_graph(self) -> DependencyGraph[AssetKey]:
         ...
 
-    @abstractmethod
-    def has_asset(self, asset_key: AssetKey) -> bool:
-        ...
-
     @property
-    @abstractmethod
+    @cached_method
     def all_asset_keys(self) -> AbstractSet[AssetKey]:
-        ...
+        return {node.key for node in self.asset_nodes}
 
     @property
-    @abstractmethod
+    @cached_method
     def materializable_asset_keys(self) -> AbstractSet[AssetKey]:
-        ...
-
-    @abstractmethod
-    def is_materializable(self, asset_key: AssetKey) -> bool:
-        ...
+        return {node.key for node in self.asset_nodes if node.is_materializable}
 
     @property
-    @abstractmethod
+    @cached_method
     def observable_asset_keys(self) -> AbstractSet[AssetKey]:
-        ...
-
-    @abstractmethod
-    def is_observable(self, asset_key: AssetKey) -> bool:
-        ...
+        return {node.key for node in self.asset_nodes if node.is_observable}
 
     @property
-    @abstractmethod
+    @cached_method
     def external_asset_keys(self) -> AbstractSet[AssetKey]:
-        ...
-
-    @abstractmethod
-    def is_external(self, asset_key: AssetKey) -> bool:
-        ...
+        return {node.key for node in self.asset_nodes if node.is_external}
 
     @property
-    @abstractmethod
+    @cached_method
     def executable_asset_keys(self) -> AbstractSet[AssetKey]:
-        ...
+        return {node.key for node in self.asset_nodes if node.is_executable}
 
-    @abstractmethod
-    def is_executable(self, asset_key: AssetKey) -> bool:
-        ...
-
-    @abstractmethod
     def asset_keys_for_group(self, group_name: str) -> AbstractSet[AssetKey]:
-        ...
+        return {node.key for node in self.asset_nodes if node.group_name == group_name}
 
     @functools.cached_property
     def root_materializable_asset_keys(self) -> AbstractSet[AssetKey]:
@@ -137,27 +215,18 @@ class AssetGraph(ABC):
         )
 
     @property
-    @abstractmethod
+    @cached_method
     def all_group_names(self) -> AbstractSet[str]:
-        ...
+        return {a.group_name for a in self._asset_nodes if a.group_name is not None}
 
-    @abstractmethod
     def get_partitions_def(self, asset_key: AssetKey) -> Optional[PartitionsDefinition]:
-        ...
-
-    @abstractmethod
-    def get_partition_mappings(self, asset_key: AssetKey) -> Mapping[AssetKey, PartitionMapping]:
-        ...
+        # Performing an existence check temporarily until we change callsites
+        return self.get_asset(asset_key).partitions_def if self.has_asset(asset_key) else None
 
     def get_partition_mapping(
         self, asset_key: AssetKey, in_asset_key: AssetKey
     ) -> PartitionMapping:
-        partition_mappings = self.get_partition_mappings(asset_key)
-        return infer_partition_mapping(
-            partition_mappings.get(in_asset_key),
-            self.get_partitions_def(asset_key),
-            self.get_partitions_def(in_asset_key),
-        )
+        return self.get_asset(asset_key).get_partition_mapping(self.get_asset(in_asset_key))
 
     def get_partitions_in_range(
         self,
@@ -176,30 +245,6 @@ class AssetGraph(ABC):
 
     def is_partitioned(self, asset_key: AssetKey) -> bool:
         return self.get_partitions_def(asset_key) is not None
-
-    @abstractmethod
-    def get_group_name(self, asset_key: AssetKey) -> Optional[str]:
-        ...
-
-    @abstractmethod
-    def get_freshness_policy(self, asset_key: AssetKey) -> Optional[FreshnessPolicy]:
-        ...
-
-    @abstractmethod
-    def get_auto_materialize_policy(self, asset_key: AssetKey) -> Optional[AutoMaterializePolicy]:
-        ...
-
-    @abstractmethod
-    def get_auto_observe_interval_minutes(self, asset_key: AssetKey) -> Optional[float]:
-        ...
-
-    @abstractmethod
-    def get_backfill_policy(self, asset_key: AssetKey) -> Optional[BackfillPolicy]:
-        ...
-
-    @abstractmethod
-    def get_code_version(self, asset_key: AssetKey) -> Optional[str]:
-        ...
 
     def have_same_partitioning(self, asset_key1: AssetKey, asset_key2: AssetKey) -> bool:
         """Returns whether the given assets have the same partitions definition."""
@@ -475,10 +520,10 @@ class AssetGraph(ABC):
 
     def has_materializable_parents(self, asset_key: AssetKey) -> bool:
         """Determines if an asset has any parents which are materializable."""
-        if self.is_external(asset_key):
+        if self.get_asset(asset_key).is_external:
             return False
         return any(
-            self.has_asset(parent_key) and self.is_materializable(parent_key)
+            self.has_asset(parent_key) and self.get_asset(parent_key).is_materializable
             for parent_key in self.get_parents(asset_key) - {asset_key}
         )
 
@@ -492,7 +537,7 @@ class AssetGraph(ABC):
             key
             for key in self.upstream_key_iterator(asset_key)
             if self.has_asset(key)
-            and self.is_materializable(key)
+            and self.get_asset(key).is_materializable
             and not self.has_materializable_parents(key)
         }
 
@@ -529,6 +574,7 @@ class AssetGraph(ABC):
     def get_downstream_freshness_policies(
         self, *, asset_key: AssetKey
     ) -> AbstractSet[FreshnessPolicy]:
+        asset = self.get_asset(asset_key)
         downstream_policies = set().union(
             *(
                 self.get_downstream_freshness_policies(asset_key=child_key)
@@ -536,9 +582,8 @@ class AssetGraph(ABC):
                 if child_key != asset_key
             )
         )
-        current_policy = self.get_freshness_policy(asset_key)
-        if self.get_partitions_def(asset_key) is None and current_policy is not None:
-            downstream_policies.add(current_policy)
+        if asset.partitions_def is None and asset.freshness_policy is not None:
+            downstream_policies.add(asset.freshness_policy)
 
         return downstream_policies
 

@@ -178,7 +178,7 @@ class CachingDataTimeResolver:
         for parent_key in self.asset_graph.get_parents(asset_key):
             if not (
                 self.asset_graph.has_asset(parent_key)
-                and self.asset_graph.is_executable(parent_key)
+                and self.asset_graph.get_asset(parent_key).is_executable
             ):
                 continue
 
@@ -319,7 +319,7 @@ class CachingDataTimeResolver:
                 cursor=record_id,
                 partitions_def=partitions_def,
             )
-        elif self.asset_graph.is_observable(asset_key):
+        elif self.asset_graph.get_asset(asset_key).is_observable:
             return self._calculate_data_time_by_key_observable_source(
                 asset_key=asset_key,
                 record_id=record_id,
@@ -533,18 +533,18 @@ class CachingDataTimeResolver:
         asset_key: AssetKey,
         evaluation_time: datetime.datetime,
     ) -> Optional[FreshnessMinutes]:
-        freshness_policy = self.asset_graph.get_freshness_policy(asset_key)
-        if freshness_policy is None:
+        asset = self.asset_graph.get_asset(asset_key)
+        if asset.freshness_policy is None:
             raise DagsterInvariantViolationError(
                 "Cannot calculate minutes late for asset without a FreshnessPolicy"
             )
 
-        if self.asset_graph.is_external(asset_key):
+        if asset.is_external:
             current_data_time = self._get_source_data_time(asset_key, current_time=evaluation_time)
         else:
             current_data_time = self.get_current_data_time(asset_key, current_time=evaluation_time)
 
-        return freshness_policy.minutes_overdue(
+        return asset.freshness_policy.minutes_overdue(
             data_time=current_data_time,
             evaluation_time=evaluation_time,
         )

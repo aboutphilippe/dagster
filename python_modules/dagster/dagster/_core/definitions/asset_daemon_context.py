@@ -54,9 +54,9 @@ def get_implicit_auto_materialize_policy(
     asset_key: AssetKey, asset_graph: AssetGraph
 ) -> Optional[AutoMaterializePolicy]:
     """For backcompat with pre-auto materialize policy graphs, assume a default scope of 1 day."""
-    auto_materialize_policy = asset_graph.get_auto_materialize_policy(asset_key)
-    if auto_materialize_policy is None:
-        time_partitions_def = get_time_partitions_def(asset_graph.get_partitions_def(asset_key))
+    asset = asset_graph.get_asset(asset_key)
+    if asset.auto_materialize_policy is None:
+        time_partitions_def = get_time_partitions_def(asset.partitions_def)
         if time_partitions_def is None:
             max_materializations_per_minute = None
         elif time_partitions_def.schedule_type == ScheduleType.HOURLY:
@@ -77,7 +77,7 @@ def get_implicit_auto_materialize_policy(
             rules=rules,
             max_materializations_per_minute=max_materializations_per_minute,
         )
-    return auto_materialize_policy
+    return asset.auto_materialize_policy
 
 
 class AssetDaemonContext:
@@ -150,7 +150,10 @@ class AssetDaemonContext:
         return [
             key
             for key in self.auto_materialize_asset_keys_and_parents
-            if (self.asset_graph.has_asset(key) and self.asset_graph.is_materializable(key))
+            if (
+                self.asset_graph.has_asset(key)
+                and self.asset_graph.get_asset(key).is_materializable
+            )
         ]
 
     @property
@@ -193,7 +196,7 @@ class AssetDaemonContext:
         """
         # convert the legacy AutoMaterializePolicy to an Evaluator
         asset_condition = check.not_none(
-            self.asset_graph.get_auto_materialize_policy(asset_key)
+            self.asset_graph.get_asset(asset_key).auto_materialize_policy
         ).to_asset_condition()
 
         asset_cursor = self.cursor.get_previous_evaluation_state(asset_key)
@@ -434,7 +437,7 @@ def build_run_requests_with_backfill_policies(
             run_requests.append(RunRequest(asset_selection=list(asset_keys), tags=tags))
         else:
             backfill_policies = {
-                check.not_none(asset_graph.get_backfill_policy(asset_key))
+                check.not_none(asset_graph.get_asset(asset_key).backfill_policy)
                 for asset_key in asset_keys
             }
             if len(backfill_policies) == 1:
@@ -453,7 +456,7 @@ def build_run_requests_with_backfill_policies(
             else:
                 # if backfill policies are different, we need to backfill them separately
                 for asset_key in asset_keys:
-                    backfill_policy = asset_graph.get_backfill_policy(asset_key)
+                    backfill_policy = asset_graph.get_asset(asset_key).backfill_policy
                     run_requests.extend(
                         _build_run_requests_with_backfill_policy(
                             [asset_key],
@@ -567,7 +570,9 @@ def get_auto_observe_run_requests(
     assets_to_auto_observe: Set[AssetKey] = set()
     for asset_key in auto_observe_asset_keys:
         last_observe_request_timestamp = last_observe_request_timestamp_by_asset_key.get(asset_key)
-        auto_observe_interval_minutes = asset_graph.get_auto_observe_interval_minutes(asset_key)
+        auto_observe_interval_minutes = asset_graph.get_asset(
+            asset_key
+        ).auto_observe_interval_minutes
 
         if auto_observe_interval_minutes and (
             last_observe_request_timestamp is None

@@ -1261,7 +1261,7 @@ def execute_asset_backfill_iteration_inner(
 
     # check if all assets have backfill policies if any of them do, otherwise, raise error
     asset_backfill_policies = [
-        asset_graph.get_backfill_policy(asset_key)
+        asset_graph.get_asset(asset_key).backfill_policy
         for asset_key in {
             asset_partition.asset_key for asset_partition in asset_partitions_to_request
         }
@@ -1352,9 +1352,9 @@ def should_backfill_atomic_asset_partitions_unit(
             asset_partitions_to_request_map[asset_partition.asset_key].add(
                 asset_partition.partition_key
             )
-        candidate_backfill_policy = asset_graph.get_backfill_policy(candidate.asset_key)
+        candidate_backfill_policy = asset_graph.get_asset(candidate.asset_key).backfill_policy
         for parent in parent_partitions_result.parent_partitions:
-            parent_backfill_policy = asset_graph.get_backfill_policy(parent.asset_key)
+            parent_backfill_policy = asset_graph.get_asset(parent.asset_key).backfill_policy
             # checks if this parent with partitions mapped has a backfill policy which would allow
             # partition mappings which are not one-one with the child to be executed in a way
             # that respects the dependencies

@@ -185,7 +185,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
         return self._asset_record_cache[asset_key]
 
     def _event_type_for_key(self, asset_key: AssetKey) -> DagsterEventType:
-        if self.asset_graph.is_external(asset_key):
+        if self.asset_graph.get_asset(asset_key).is_external:
             return DagsterEventType.ASSET_OBSERVATION
         else:
             return DagsterEventType.ASSET_MATERIALIZATION
@@ -204,7 +204,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
             and asset_partition.partition_key is None
             and not (
                 self.asset_graph.has_asset(asset_partition.asset_key)
-                and self.asset_graph.is_observable(asset_partition.asset_key)
+                and self.asset_graph.get_asset(asset_partition.asset_key).is_observable
             )
         ):
             asset_record = self.get_asset_record(asset_partition.asset_key)
@@ -286,7 +286,10 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
                 greater than this value will be considered.
         """
         asset_key = asset_partition.asset_key
-        if self.asset_graph.has_asset(asset_key) and self.asset_graph.is_materializable(asset_key):
+        if (
+            self.asset_graph.has_asset(asset_key)
+            and self.asset_graph.get_asset(asset_key).is_materializable
+        ):
             asset_record = self.get_asset_record(asset_key)
             if (
                 asset_record is None
@@ -535,11 +538,11 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
         """Finds asset partitions of the given child whose parents have been materialized since
         latest_storage_id.
         """
-        if self.asset_graph.is_external(child_asset_key):
+        child_asset = self.asset_graph.get_asset(child_asset_key)
+        if child_asset.is_external:
             return set(), latest_storage_id
 
-        child_partitions_def = self.asset_graph.get_partitions_def(child_asset_key)
-        child_time_partitions_def = get_time_partitions_def(child_partitions_def)
+        child_time_partitions_def = get_time_partitions_def(child_asset.partitions_def)
 
         child_asset_partitions_with_updated_parents = set()
 
@@ -552,7 +555,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
             # ignore missing and non-executable parents
             if not (
                 self.asset_graph.has_asset(parent_asset_key)
-                and self.asset_graph.is_executable(parent_asset_key)
+                and self.asset_graph.get_asset(parent_asset_key).is_executable
             ):
                 continue
 
@@ -587,7 +590,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
                         child_asset_key=child_asset_key,
                         current_time=self.evaluation_time,
                     )
-                    if child_partitions_def
+                    if child_asset.partitions_def
                     else [None]
                 ):
                     if not (
@@ -595,7 +598,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
                         # historical time partitions
                         not map_old_time_partitions
                         and child_time_partitions_def is not None
-                        and get_time_partition_key(child_partitions_def, child_partition_key)
+                        and get_time_partition_key(child_asset.partitions_def, child_partition_key)
                         != child_time_partitions_def.get_last_partition_key(
                             current_time=self.evaluation_time
                         )
@@ -608,7 +611,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
             else:
                 # we know a parent updated, and because the parent has a partitions def and the
                 # child does not, the child could not have been materialized in the same run
-                if child_partitions_def is None:
+                if child_asset.partitions_def is None:
                     child_asset_partitions_with_updated_parents = {
                         AssetKeyPartitionKey(child_asset_key)
                     }
@@ -627,7 +630,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
                         partition_mapping.get_downstream_partitions_for_partitions(
                             parent_partitions_subset,
                             upstream_partitions_def=parent_partitions_def,
-                            downstream_partitions_def=child_partitions_def,
+                            downstream_partitions_def=child_asset.partitions_def,
                             dynamic_partitions_store=self,
                             current_time=self.evaluation_time,
                         )
@@ -645,7 +648,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
                     if (
                         # if child has a different partitions def than the parent, then it must
                         # have been executed in a different run, so it's a valid candidate
-                        child_partitions_def != parent_partitions_def
+                        child_asset.partitions_def != parent_partitions_def
                         # if child partition key is not the same as any newly materialized
                         # parent key, then it could not have been executed in the same run as
                         # its parent
@@ -805,7 +808,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
         if not updated_after_cursor:
             return set()
         if after_cursor is None or (
-            not self.asset_graph.is_external(asset_key)
+            not self.asset_graph.get_asset(asset_key).is_external
             and not respect_materialization_data_versions
         ):
             return updated_after_cursor
@@ -902,7 +905,7 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
             # ignore non-existent or unexecutable parents
             if not (
                 self.asset_graph.has_asset(parent_key)
-                and self.asset_graph.is_executable(parent_key)
+                and self.asset_graph.get_asset(parent_key).is_executable
             ):
                 continue
 
@@ -950,7 +953,8 @@ class CachingInstanceQueryer(DynamicPartitionsStore):
         asset_key = asset_partition.asset_key
         partition_key = asset_partition.partition_key
         if not (
-            self.asset_graph.has_asset(asset_key) and self.asset_graph.is_materializable(asset_key)
+            self.asset_graph.has_asset(asset_key)
+            and self.asset_graph.get_asset(asset_key).is_materializable
         ):
             return set()
 

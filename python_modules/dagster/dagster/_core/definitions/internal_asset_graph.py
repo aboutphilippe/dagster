@@ -2,7 +2,7 @@ from typing import AbstractSet, Iterable, Mapping, Optional, Sequence, Union
 
 from dagster._core.definitions.asset_check_spec import AssetCheckKey
 from dagster._core.definitions.asset_checks import AssetChecksDefinition
-from dagster._core.definitions.asset_graph import AssetGraph, AssetKeyOrCheckKey
+from dagster._core.definitions.asset_graph import AssetGraph, AssetKeyOrCheckKey, AssetNode
 from dagster._core.definitions.assets import AssetsDefinition
 from dagster._core.definitions.auto_materialize_policy import AutoMaterializePolicy
 from dagster._core.definitions.backfill_policy import BackfillPolicy
@@ -15,21 +15,84 @@ from dagster._core.selector.subset_selector import DependencyGraph, generate_ass
 from dagster._utils.cached_method import cached_method
 
 
-class InternalAssetGraph(AssetGraph):
+class LocalAssetNode(AssetNode):
+    def __init__(self, key: AssetKey, assets_def: AssetsDefinition):
+        self.key = key
+        self.assets_def = assets_def
+
+    @property
+    @cached_method
+    def group_name(self) -> Optional[str]:
+        return self.assets_def.group_names_by_key.get(self.key)
+
+    @property
+    def is_materializable(self) -> bool:
+        return self.assets_def.is_materializable
+
+    @property
+    def is_observable(self) -> bool:
+        return self.assets_def.is_observable
+
+    @property
+    def is_external(self) -> bool:
+        return self.assets_def.is_external
+
+    @property
+    def is_executable(self) -> bool:
+        return self.assets_def.is_executable
+
+    @property
+    def is_partitioned(self) -> bool:
+        return self.assets_def.partitions_def is not None
+
+    @property
+    def partitions_def(self) -> Optional[PartitionsDefinition]:
+        return self.assets_def.partitions_def
+
+    @property
+    def partition_mappings(self) -> Mapping[AssetKey, PartitionMapping]:
+        return self.assets_def.partition_mappings
+
+    @property
+    def freshness_policy(self) -> Optional[FreshnessPolicy]:
+        return self.assets_def.freshness_policies_by_key.get(self.key)
+
+    @property
+    def auto_materialize_policy(self) -> Optional[AutoMaterializePolicy]:
+        return self.assets_def.auto_materialize_policies_by_key.get(self.key)
+
+    @property
+    def auto_observe_interval_minutes(self) -> Optional[float]:
+        return self.assets_def.auto_observe_interval_minutes
+
+    @property
+    def backfill_policy(self) -> Optional[BackfillPolicy]:
+        return self.assets_def.backfill_policy
+
+    @property
+    def code_version(self) -> Optional[str]:
+        return self.assets_def.code_versions_by_key.get(self.key)
+
+    @property
+    def check_keys(self) -> AbstractSet[AssetCheckKey]:
+        return self.assets_def.check_keys
+
+
+class InternalAssetGraph(AssetGraph[LocalAssetNode]):
     def __init__(
         self,
-        assets_defs: Sequence[AssetsDefinition],
+        asset_nodes: Sequence[LocalAssetNode],
         asset_checks_defs: Sequence[AssetChecksDefinition],
     ):
-        self._assets_defs = assets_defs
-        self._assets_defs_by_key = {key: asset for asset in self._assets_defs for key in asset.keys}
-        self._assets_defs_by_check_key = {
-            **{check_key: asset for asset in assets_defs for check_key in asset.check_keys},
+        self._asset_nodes = asset_nodes
+        self._asset_nodes_by_key = {asset.key: asset for asset in asset_nodes}
+        self._asset_nodes_by_check_key = {
+            **{check_key: asset for asset in asset_nodes for check_key in asset.check_keys},
             **{
-                check_key: self._assets_defs_by_key[check.asset_key]
+                check_key: self._asset_nodes_by_key[check.asset_key]
                 for check in asset_checks_defs
                 for check_key in check.keys
-                if check.asset_key in self._assets_defs_by_key
+                if check.asset_key in self._asset_nodes_by_key
             },
         }
 
@@ -49,8 +112,9 @@ class InternalAssetGraph(AssetGraph):
             create_external_asset_from_source_asset(a) if isinstance(a, SourceAsset) else a
             for a in all_assets
         ]
+        asset_nodes = [LocalAssetNode(key=k, assets_def=ad) for ad in assets_defs for k in ad.keys]
         return InternalAssetGraph(
-            assets_defs=assets_defs,
+            asset_nodes=asset_nodes,
             asset_checks_defs=asset_checks or [],
         )
 
@@ -58,23 +122,17 @@ class InternalAssetGraph(AssetGraph):
     def asset_check_keys(self) -> AbstractSet[AssetCheckKey]:
         return {
             *(key for check in self._asset_checks_defs for key in check.keys),
-            *(key for asset in self._assets_defs for key in asset.check_keys),
+            *(key for asset in self.assets_defs for key in asset.check_keys),
         }
 
     @property
+    @cached_method
     def assets_defs(self) -> Sequence[AssetsDefinition]:
-        return self._assets_defs
+        return list(dict.fromkeys(asset.assets_def for asset in self._asset_nodes))
 
-    def get_assets_def(self, asset_key: AssetKey) -> AssetsDefinition:
-        return self._assets_defs_by_key[asset_key]
-
-    def has_asset(self, asset_key: AssetKey) -> bool:
-        return asset_key in self._assets_defs_by_key
-
-    def get_assets_def_for_check(
-        self, asset_check_key: AssetCheckKey
-    ) -> Optional[AssetsDefinition]:
-        return self._assets_defs_by_check_key.get(asset_check_key)
+    @cached_method
+    def get_asset_node_for_check(self, *, key: AssetCheckKey) -> Optional[LocalAssetNode]:
+        return self._asset_nodes_by_check_key.get(key)
 
     @property
     def asset_checks_defs(self) -> Sequence[AssetChecksDefinition]:
@@ -99,103 +157,28 @@ class InternalAssetGraph(AssetGraph):
     @property
     @cached_method
     def asset_dep_graph(self) -> DependencyGraph[AssetKey]:
-        return generate_asset_dep_graph(self._assets_defs, [])
-
-    @property
-    @cached_method
-    def all_asset_keys(self) -> AbstractSet[AssetKey]:
-        return {key for ad in self._assets_defs for key in ad.keys}
-
-    @property
-    @cached_method
-    def materializable_asset_keys(self) -> AbstractSet[AssetKey]:
-        return {key for ad in self._assets_defs if ad.is_materializable for key in ad.keys}
-
-    def is_materializable(self, asset_key: AssetKey) -> bool:
-        return self.get_assets_def(asset_key).is_materializable
-
-    @property
-    @cached_method
-    def observable_asset_keys(self) -> AbstractSet[AssetKey]:
-        return {key for ad in self._assets_defs if ad.is_observable for key in ad.keys}
-
-    def is_observable(self, asset_key: AssetKey) -> bool:
-        return self.get_assets_def(asset_key).is_observable
-
-    @property
-    @cached_method
-    def external_asset_keys(self) -> AbstractSet[AssetKey]:
-        return {key for ad in self._assets_defs if ad.is_external for key in ad.keys}
-
-    def is_external(self, asset_key: AssetKey) -> bool:
-        return self.get_assets_def(asset_key).is_external
-
-    @property
-    @cached_method
-    def executable_asset_keys(self) -> AbstractSet[AssetKey]:
-        return {key for ad in self._assets_defs if ad.is_executable for key in ad.keys}
-
-    def is_executable(self, asset_key: AssetKey) -> bool:
-        return self.get_assets_def(asset_key).is_executable
-
-    def asset_keys_for_group(self, group_name: str) -> AbstractSet[AssetKey]:
-        return {
-            key
-            for ad in self._assets_defs
-            for key in ad.keys
-            if ad.group_names_by_key[key] == group_name
-        }
+        return generate_asset_dep_graph(self.assets_defs, [])
 
     def get_required_multi_asset_keys(self, asset_key: AssetKey) -> AbstractSet[AssetKey]:
-        asset = self.get_assets_def(asset_key)
-        return set() if len(asset.keys) <= 1 or asset.can_subset else asset.keys
+        assets_def = self.get_asset(asset_key).assets_def
+        return set() if len(assets_def.keys) <= 1 or assets_def.can_subset else assets_def.keys
 
     def get_required_asset_and_check_keys(
         self, asset_or_check_key: AssetKeyOrCheckKey
     ) -> AbstractSet[AssetKeyOrCheckKey]:
         if isinstance(asset_or_check_key, AssetKey):
-            asset = self.get_assets_def(asset_or_check_key)
+            assets_def = self.get_asset(asset_or_check_key).assets_def
         else:  # AssetCheckKey
             # only checks emitted by AssetsDefinition have required keys
             if self.has_asset_check(asset_or_check_key):
                 return set()
             else:
-                asset = self.get_assets_def_for_check(asset_or_check_key)
-                if asset is None or asset_or_check_key not in asset.check_keys:
+                asset_node = self.get_asset_node_for_check(key=asset_or_check_key)
+                if asset_node is None or asset_or_check_key not in asset_node.check_keys:
                     return set()
-        has_checks = len(asset.check_keys) > 0
-        if asset.can_subset or len(asset.keys) <= 1 and not has_checks:
+                assets_def = asset_node.assets_def
+        has_checks = len(assets_def.check_keys) > 0
+        if assets_def.can_subset or len(assets_def.keys) <= 1 and not has_checks:
             return set()
         else:
-            return {*asset.keys, *asset.check_keys}
-
-    @property
-    @cached_method
-    def all_group_names(self) -> AbstractSet[str]:
-        return {
-            group_name for ad in self._assets_defs for group_name in ad.group_names_by_key.values()
-        }
-
-    def get_partitions_def(self, asset_key: AssetKey) -> Optional[PartitionsDefinition]:
-        return self.get_assets_def(asset_key).partitions_def
-
-    def get_partition_mappings(self, asset_key: AssetKey) -> Mapping[AssetKey, PartitionMapping]:
-        return self.get_assets_def(asset_key).partition_mappings
-
-    def get_group_name(self, asset_key: AssetKey) -> Optional[str]:
-        return self.get_assets_def(asset_key).group_names_by_key.get(asset_key)
-
-    def get_freshness_policy(self, asset_key: AssetKey) -> Optional[FreshnessPolicy]:
-        return self.get_assets_def(asset_key).freshness_policies_by_key.get(asset_key)
-
-    def get_auto_materialize_policy(self, asset_key: AssetKey) -> Optional[AutoMaterializePolicy]:
-        return self.get_assets_def(asset_key).auto_materialize_policies_by_key.get(asset_key)
-
-    def get_auto_observe_interval_minutes(self, asset_key: AssetKey) -> Optional[float]:
-        return self.get_assets_def(asset_key).auto_observe_interval_minutes
-
-    def get_backfill_policy(self, asset_key: AssetKey) -> Optional[BackfillPolicy]:
-        return self.get_assets_def(asset_key).backfill_policy
-
-    def get_code_version(self, asset_key: AssetKey) -> Optional[str]:
-        return self.get_assets_def(asset_key).code_versions_by_key.get(asset_key)
+            return {*assets_def.keys, *assets_def.check_keys}

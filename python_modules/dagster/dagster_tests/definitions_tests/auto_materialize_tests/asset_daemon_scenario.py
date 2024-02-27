@@ -438,7 +438,7 @@ class AssetDaemonScenarioState(NamedTuple):
             auto_materialize_asset_keys={
                 key
                 for key in self.asset_graph.materializable_asset_keys
-                if self.asset_graph.get_auto_materialize_policy(key) is not None
+                if self.asset_graph.get_asset(key).auto_materialize_policy is not None
             },
             instance=self.instance,
             materialize_run_tags={},
@@ -447,7 +447,7 @@ class AssetDaemonScenarioState(NamedTuple):
             auto_observe_asset_keys={
                 key
                 for key in self.asset_graph.external_asset_keys
-                if self.asset_graph.get_auto_observe_interval_minutes(key) is not None
+                if self.asset_graph.get_asset(key).auto_observe_interval_minutes is not None
             },
             respect_materialization_data_versions=False,
             logger=self.logger,
