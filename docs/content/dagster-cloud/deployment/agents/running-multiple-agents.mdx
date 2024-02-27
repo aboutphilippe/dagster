@@ -207,11 +207,11 @@ Modify your ECS Cloud Formation template to add the following configuration to t
 
 ```yaml
 agent_queues:
-    # Continue to handle requests for code locations that aren't
-    # assigned to a specific agent queue
-    include_default_queue: true
-    additional_queues:
-      - special-queue
+  # Continue to handle requests for code locations that aren't
+  # assigned to a specific agent queue
+  include_default_queue: true
+  additional_queues:
+    - special-queue
 ```
 
 </TabItem>
