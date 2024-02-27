@@ -349,8 +349,7 @@ run_monitoring:
 
 # start_run_retries
 run_retries:
-  enabled: true
-  max_retries: 3 # Sets a default for all jobs. 0 if not set
+  max_retries: 3
 # end_run_retries
 
 
