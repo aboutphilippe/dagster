@@ -316,23 +316,29 @@ agent_queues:
 
 ### isolated_agents properties
 
+
+
 <ReferenceTable>
   <ReferenceTableItem propertyName="isolated_agents.enabled">
     When isolated agents is enabled, they can no longer access each others'
     resources. See [Running multiple
-    agents](https://docs.dagster.io/dagster-cloud/deployment/agents/running-multiple-agents#running-multiple-agents-in-different-environments)
+    agents](/dagster-cloud/deployment/agents/running-multiple-agents#running-multiple-agents-in-different-environments)
   </ReferenceTableItem>
 </ReferenceTable>
 
 ### agent_queues properties
 
+These properties control which requests queue are routed to the agent.
+See [Routing requests to specific agents](/dagster-cloud/deployment/agents/running-multiple-agents#routing-requests-to-specific-agents).
+
+
 <ReferenceTable>
-
-  <ReferenceTableItem propertyName="agent_queues.include_default_queue">
-    This agent process requests from the default queue if set to true.
+  <ReferenceTableItem
+  propertyName="agent_queues.include_default_queue">
+  This agent process requests from the default queue if set to true.
   </ReferenceTableItem>
-  <ReferenceTableItem propertyName="agent_queues.queues">
-    A list of additional queues to include in the agent's processing.
+  <ReferenceTableItem
+  propertyName="agent_queues.queues">
+  A list of additional queues to include in the agent's processing.
   </ReferenceTableItem>
-
 </ReferenceTable>
